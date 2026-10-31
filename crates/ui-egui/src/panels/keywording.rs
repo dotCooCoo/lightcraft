@@ -713,21 +713,22 @@ pub(crate) fn chips(catalog: &Catalog, photos: &[PhotoId]) -> Vec<Chip> {
 
 /// The Enter Keywords text of the selection's keywords `chips`: each keyword's path, with commas
 /// between them and an asterisk after a keyword only some of the selected photos have. A keyword
-/// whose name holds a comma or a new line is written in double quotes (before its asterisk), so that
-/// it reads as one name. A keyword every photo has whose name ends in an asterisk, or is itself in
-/// double quotes, is also written in double quotes, so that it reads differently from a partial
-/// keyword marked with the asterisk.
+/// whose name holds a comma, a new line or a double quote is written in double quotes (before its
+/// asterisk), each double quote inside written twice, so that it reads as one name. A keyword every
+/// photo has whose name ends in an asterisk is also written in double quotes, so that it reads
+/// differently from a partial keyword marked with the asterisk.
 pub(crate) fn entered_text(chips: &[Chip]) -> String {
     chips
         .iter()
         .map(|c| {
-            let separated = c.path.contains([',', '\n']);
-            if !c.on_all() && separated {
-                format!("\"{}\"*", c.path)
+            let in_quotes = || format!("\"{}\"", c.path.replace('"', "\"\""));
+            let held = c.path.contains([',', '\n', '"']);
+            if !c.on_all() && held {
+                format!("{}*", in_quotes())
             } else if !c.on_all() {
                 format!("{}*", c.path)
-            } else if separated || c.path.ends_with('*') || quoted(&c.path).is_some() {
-                format!("\"{}\"", c.path)
+            } else if held || c.path.ends_with('*') {
+                in_quotes()
             } else {
                 c.path.clone()
             }
@@ -736,9 +737,19 @@ pub(crate) fn entered_text(chips: &[Chip]) -> String {
         .join(", ")
 }
 
-/// The name inside `token` when it is in double quotes.
-fn quoted(token: &str) -> Option<&str> {
-    token.strip_prefix('"')?.strip_suffix('"')
+/// The name inside `token` when it is in double quotes, each double quote inside it written twice
+/// (a single one inside means it is not).
+fn quoted(token: &str) -> Option<String> {
+    let inside = token.strip_prefix('"')?.strip_suffix('"')?;
+    let mut name = String::with_capacity(inside.len());
+    let mut chars = inside.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '"' && chars.next() != Some('"') {
+            return None;
+        }
+        name.push(ch);
+    }
+    Some(name)
 }
 
 /// What an edit of the Enter Keywords text gives to and takes off the selected photos.
@@ -759,20 +770,24 @@ impl Entered {
 
 /// The names in the Enter Keywords `text`, trimmed: the text split at commas and new lines, except
 /// where a name opened with a double quote closes with one (the next piece holding a double quote
-/// ends with it, or with it and an asterisk), and only commas lie between or the name spells a
-/// keyword of `start` the text has not named yet; or where pieces joined by their separators spell
-/// a keyword of `start` whose name holds a comma or a new line (with or without its asterisk or its
-/// quotes) that the text has not named yet, unless each of those pieces is a keyword of `start` by
-/// itself. Either stays one name.
+/// not written twice ends with it, or with it and an asterisk), only commas lie between or the
+/// name spells a keyword of `start` the text has not named yet, and each double quote inside is
+/// written twice; or where pieces joined by their separators spell a keyword of `start` whose name
+/// holds a comma or a new line (with or without its asterisk or its quotes) that the text has not
+/// named yet, unless each of those pieces is a keyword of `start` by itself. Either stays one name.
 fn entered_names<'a>(start: &[Chip], text: &'a str) -> Vec<&'a str> {
     use lightcraft_catalog::keywords::{clean, same};
     let is_separator = |ch: char| ch == ',' || ch == '\n';
     let spells = |s: &str, c: &Chip| {
         let marked = s.strip_suffix('*');
-        [Some(s), marked, quoted(s), marked.and_then(quoted)].into_iter().flatten().any(|n| same(&clean(n), &c.path))
+        let inside = [quoted(s), marked.and_then(quoted)];
+        [Some(s), marked].into_iter().flatten().chain(inside.iter().flatten().map(String::as_str)).any(|n| same(&clean(n), &c.path))
     };
-    // a piece that closes a name in double quotes
-    let closes = |s: &str| s.ends_with('"') || s.ends_with("\"*");
+    // a piece holding a double quote that is not one written twice
+    let unpaired = |s: &str| s.split(|ch| ch != '"').any(|run| run.len() % 2 == 1);
+    // a piece that closes a name in double quotes: it ends with one (before an asterisk or not)
+    // that is not one written twice
+    let closes = |s: &str| s.strip_suffix('*').unwrap_or(s).chars().rev().take_while(|&ch| ch == '"').count() % 2 == 1;
     // the keywords of `start` the text has named so far
     let mut named = vec![false; start.len()];
     let unnamed = |s: &str, named: &[bool]| start.iter().zip(named).position(|(c, n)| !n && spells(s, c));
@@ -795,9 +810,10 @@ fn entered_names<'a>(start: &[Chip], text: &'a str) -> Vec<&'a str> {
                     .iter()
                     .enumerate()
                     .skip(i + 1)
-                    .find(|(_, p)| piece(p).contains('"'))
+                    .find(|(_, p)| unpaired(piece(p)))
                     .filter(|(_, p)| closes(piece(p)))
                     .and_then(|(j, p)| Some((j - i, text.get(first.start..p.end)?.trim())))
+                    .filter(|&(_, s)| quoted(s.strip_suffix('*').unwrap_or(s)).is_some())
                     .filter(|&(_, s)| !s.contains('\n') || unnamed(s, &named).is_some())
             })
             .flatten();
@@ -837,10 +853,10 @@ fn entered_names<'a>(start: &[Chip], text: &'a str) -> Vec<&'a str> {
 /// to every selected photo (a keyword of `start` keeps its spelling, and a new name goes where
 /// `Catalog::typed_keyword` puts it). A keyword only some photos have, still marked with its
 /// asterisk, stays on those photos only, the name in double quotes before the asterisk included. A
-/// name in double quotes is read as written, an asterisk at its end included. A keyword every
-/// photo has whose own name ends in an asterisk is also kept when written without its quotes,
-/// unless a keyword only some photos have reads the same. An asterisk after any other name is
-/// refused: the error is the name as typed.
+/// name in double quotes is read as written, an asterisk at its end included, and a double quote
+/// written twice inside it is one double quote. A keyword every photo has whose own name ends in an
+/// asterisk is also kept when written without its quotes, unless a keyword only some photos have
+/// reads the same. An asterisk after any other name is refused: the error is the name as typed.
 pub(crate) fn entered(catalog: &Catalog, start: &[Chip], text: &str) -> Result<Entered, String> {
     use lightcraft_catalog::keywords::{clean, same};
     let mut kept: Vec<String> = Vec::new();
@@ -850,7 +866,7 @@ pub(crate) fn entered(catalog: &Catalog, start: &[Chip], text: &str) -> Result<E
         if let Some(marked) = token.strip_suffix('*').filter(|_| literal.is_none()) {
             let (whole, name) = (clean(token), clean(marked));
             // the name inside the quotes of a marked name in double quotes
-            let inner = quoted(marked).map(clean);
+            let inner = quoted(marked).map(|n| clean(&n));
             // a partial keyword marked (as written, else inside its quotes), or else a keyword on
             // every photo named with the asterisk; one not named yet first
             let on_all = |c: &Chip| c.on_all() && same(&c.path, &whole);
@@ -867,7 +883,7 @@ pub(crate) fn entered(catalog: &Catalog, start: &[Chip], text: &str) -> Result<E
             kept.push(found.path.clone());
             continue;
         }
-        let written = literal.unwrap_or(token);
+        let written = literal.as_deref().unwrap_or(token);
         let typed = clean(written);
         let (name, on_all) = match start.iter().find(|c| same(&c.path, &typed)) {
             Some(c) => (c.path.clone(), c.on_all()),
@@ -1329,8 +1345,37 @@ mod tests {
         // a keyword every photo has that is itself in quotes keeps them
         let (c, ids) = library(&[&["\"quoted\""]]);
         let start = chips(&c, &ids);
-        assert_eq!(entered_text(&start), "\"\"quoted\"\"");
+        assert_eq!(entered_text(&start), "\"\"\"quoted\"\"\"");
         assert_eq!(entered(&c, &start, &entered_text(&start)), Ok(Entered::default()));
+    }
+
+    /// A keyword whose name holds a double quote is written in double quotes with that one written
+    /// twice, so that the text left as it is changes nothing, beside keywords spelled like its pieces
+    /// too.
+    #[test]
+    fn a_keyword_with_a_double_quote_reads_back() {
+        let sets: [&[&str]; 6] = [
+            &["a", "b\"", "a\", b"],
+            &["a", "b\"", "a\"", "b"],
+            &["a\", b"],
+            &["\"b", "c\""],
+            &["\"quoted\"", "say \"hi\", there", "\"a, b"],
+            &["x", "a\"\"b"],
+        ];
+        for set in sets {
+            let (c, ids) = library(&[set]);
+            let start = chips(&c, &ids);
+            assert_eq!(entered(&c, &start, &entered_text(&start)), Ok(Entered::default()), "{set:?} on every photo: {}", entered_text(&start));
+            // each one only some photos have
+            let (c, ids) = library(&[set, &["x"]]);
+            let start = chips(&c, &ids);
+            assert_eq!(entered(&c, &start, &entered_text(&start)), Ok(Entered::default()), "{set:?} partial: {}", entered_text(&start));
+        }
+        let (c, ids) = library(&[&["a", "b\"", "a\", b"]]);
+        let start = chips(&c, &ids);
+        assert_eq!(entered_text(&start), "a, \"a\"\", b\", \"b\"\"\"");
+        assert_eq!(entered(&c, &start, "a, \"b\"\"\""), Ok(edit(&[], &["a\", b"])), "its entry deleted");
+        assert_eq!(entered(&c, &start, "a, b\""), Ok(edit(&[], &["a\", b"])), "written without its quotes");
     }
 
     /// A new name goes inside the default parent, as one typed in the Add keyword box does.
