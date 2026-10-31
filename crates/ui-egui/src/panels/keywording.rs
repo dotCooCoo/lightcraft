@@ -753,46 +753,45 @@ impl Entered {
 }
 
 /// The names in the Enter Keywords `text`, trimmed: the text split at commas and new lines, except
-/// where pieces of one line joined by their commas spell a keyword of `start` whose name holds a
-/// comma (with or without its asterisk or its quotes) that the text has not named yet, which stays
-/// one name.
+/// where pieces joined by their separators spell a keyword of `start` whose name holds a comma or a
+/// new line (with or without its asterisk or its quotes) that the text has not named yet, which
+/// stays one name.
 fn entered_names<'a>(start: &[Chip], text: &'a str) -> Vec<&'a str> {
     use lightcraft_catalog::keywords::{clean, same};
+    let is_separator = |ch: char| ch == ',' || ch == '\n';
     let spells = |s: &str, c: &Chip| [Some(s), s.strip_suffix('*'), quoted(s)].into_iter().flatten().any(|n| same(&clean(n), &c.path));
     // the keywords of `start` the text has named so far
     let mut named = vec![false; start.len()];
     let unnamed = |s: &str, named: &[bool]| start.iter().zip(named).position(|(c, n)| !n && spells(s, c));
+    // each piece's byte range in the text
+    let mut pieces: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut from = 0;
+    for piece in text.split(is_separator) {
+        pieces.push(from..from + piece.len());
+        from += piece.len() + 1;
+    }
     let mut names = Vec::new();
-    for line in text.split('\n') {
-        // each piece's byte range in the line
-        let mut pieces: Vec<std::ops::Range<usize>> = Vec::new();
-        let mut from = 0;
-        for piece in line.split(',') {
-            pieces.push(from..from + piece.len());
-            from += piece.len() + 1;
+    let mut i = 0;
+    while let Some(first) = pieces.get(i) {
+        // the most pieces that spell a keyword with separators not named yet
+        let joined = start
+            .iter()
+            .map(|c| c.path.matches(is_separator).count())
+            .filter(|&separators| separators > 0)
+            .filter_map(|separators| {
+                let last = pieces.get(i + separators)?;
+                let s = text.get(first.start..last.end)?.trim();
+                unnamed(s, &named).map(|_| (separators, s))
+            })
+            .max_by_key(|&(separators, _)| separators);
+        let (separators, name) = joined.unwrap_or((0, text.get(first.clone()).unwrap_or_default().trim()));
+        if let Some(n) = unnamed(name, &named) {
+            named[n] = true;
         }
-        let mut i = 0;
-        while let Some(first) = pieces.get(i) {
-            // the most pieces that spell a keyword with commas not named yet
-            let joined = start
-                .iter()
-                .map(|c| c.path.matches(',').count())
-                .filter(|&commas| commas > 0)
-                .filter_map(|commas| {
-                    let last = pieces.get(i + commas)?;
-                    let s = line.get(first.start..last.end)?.trim();
-                    unnamed(s, &named).map(|_| (commas, s))
-                })
-                .max_by_key(|&(commas, _)| commas);
-            let (commas, name) = joined.unwrap_or((0, line.get(first.clone()).unwrap_or_default().trim()));
-            if let Some(n) = unnamed(name, &named) {
-                named[n] = true;
-            }
-            if !name.is_empty() {
-                names.push(name);
-            }
-            i += commas + 1;
+        if !name.is_empty() {
+            names.push(name);
         }
+        i += separators + 1;
     }
     names
 }
@@ -1229,6 +1228,21 @@ mod tests {
         assert_eq!(entered(&c, &start, &entered_text(&start)), Ok(Entered::default()));
         assert_eq!(entered(&c, &start, "a, b, a, b"), Ok(Entered::default()), "reordered");
         assert_eq!(entered(&c, &start, "a, b, a"), Ok(edit(&[], &["b"])));
+    }
+
+    /// A keyword whose name holds a new line is read as one name, as one holding a comma is.
+    #[test]
+    fn a_keyword_with_a_line_break_is_one_name() {
+        let (c, ids) = library(&[&["a\nb", "beach", "x,\ny"], &["beach"]]);
+        let start = chips(&c, &ids);
+        let text = entered_text(&start);
+        assert_eq!(text, "a\nb*, beach, x,\ny*");
+        assert_eq!(entered(&c, &start, &text), Ok(Entered::default()));
+        assert_eq!(entered(&c, &start, "beach, a\nb"), Ok(edit(&["a\nb"], &["x,\ny"])));
+        assert_eq!(entered(&c, &start, "beach\na"), Ok(edit(&["a"], &["a\nb", "x,\ny"])));
+        let (c, ids) = library(&[&["a\nb"]]);
+        let start = chips(&c, &ids);
+        assert_eq!(entered(&c, &start, &entered_text(&start)), Ok(Entered::default()), "on every photo");
     }
 
     /// A keyword on every photo whose own name ends in an asterisk is written in quotes and kept when
