@@ -13,7 +13,7 @@ pub const ZOOM_HIGH: f64 = 1.12;
 /// The wider view's share of the closer view's zoom above 1.
 const WIDE_SHARE: f64 = 0.25;
 
-/// A window of the photo: its zoom (1 = the whole photo) and its centre (0–1 across and down).
+/// A window of the photo: its zoom (1 = the whole photo) and its center (0–1 across and down).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct View {
     pub zoom: f64,
@@ -26,7 +26,7 @@ impl View {
     pub const FULL: View = View { zoom: 1.0, x: 0.5, y: 0.5 };
 
     /// The window as (x0, y0, x1, y1), inside 0–1: a zoom below 1 or not finite is 1, and the
-    /// centre is kept far enough from the edges for the window to fit.
+    /// center is kept far enough from the edges for the window to fit.
     pub fn window(&self) -> (f64, f64, f64, f64) {
         let z = if self.zoom.is_finite() { self.zoom.max(1.0) } else { 1.0 };
         let h = 0.5 / z;
@@ -77,7 +77,7 @@ impl Motion {
     }
 
     /// The view at `t` (0 = the slide's start, 1 = its end; clamped, not finite = 0). Zoom and
-    /// centre move linearly; the window stays inside the photo all the way.
+    /// center move linearly; the window stays inside the photo all the way.
     pub fn at(&self, t: f64) -> View {
         let t = if t.is_finite() { t.clamp(0.0, 1.0) } else { 0.0 };
         let l = |a: f64, b: f64| a + (b - a) * t;
@@ -135,6 +135,6 @@ mod tests {
         assert_eq!(m.at(f64::NAN), m.start);
         assert_eq!(View::FULL.window(), (0.0, 0.0, 1.0, 1.0));
         assert_eq!(View { zoom: f64::NAN, x: 9.0, y: -1.0 }.window(), (0.0, 0.0, 1.0, 1.0), "bad values: the whole photo");
-        assert_eq!(View { zoom: 2.0, x: 0.0, y: 1.0 }.window(), (0.0, 0.5, 0.5, 1.0), "the centre is moved in");
+        assert_eq!(View { zoom: 2.0, x: 0.0, y: 1.0 }.window(), (0.0, 0.5, 0.5, 1.0), "the center is moved in");
     }
 }
