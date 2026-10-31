@@ -302,6 +302,80 @@ fn a_manual_slideshow_waits_for_the_arrow_keys() {
 }
 
 #[test]
+fn pan_and_zoom_moves_the_photo_inside_its_cell() {
+    let mut h = grid();
+    run(&mut h, "slideshow.layout", json!({"margins": 0.1, "backdropColor": "#ff0000"}));
+    run(&mut h, "slideshow.playback", json!({"panAndZoom": true, "panAndZoomAmount": 1.0}));
+    let r = run(&mut h, "view.slideshow", json!({"interval": 60, "fadeDuration": 0, "seed": 3}));
+    assert_eq!((r["settings"]["panAndZoom"].clone(), r["settings"]["panAndZoomAmount"].clone()), (json!(true), json!(1.0)), "{r}");
+    let current = photo_up(&h);
+    assert!(h.step_until(SETTLE, |h| has_slide(h, current)), "the slide is composed and ready");
+    h.step();
+    let s = run(&mut h, "slideshow.togglePause", json!({}));
+    assert_eq!(s["panAndZoom"], true, "{s}");
+    let start = s["view"].clone();
+    let w = start.as_array().map(|v| v.iter().filter_map(|x| x.as_f64()).collect::<Vec<_>>()).unwrap_or_default();
+    assert_eq!(w.len(), 4, "{s}");
+    assert!(w[0] >= 0.0 && w[1] >= 0.0 && w[2] <= 1.0 && w[3] <= 1.0 && w[2] - w[0] < 1.0, "a window inside the photo: {s}");
+    let moving = h.paint();
+    // the backdrop stays where it is
+    for (x, y) in [(5, 5), (995, 5), (500, 30), (30, 350), (985, 350)] {
+        assert_eq!(painted(&moving, x, y), [255, 0, 0], "margin at ({x}, {y})");
+    }
+    // playing on, it moves
+    run(&mut h, "slideshow.togglePause", json!({}));
+    for _ in 0..240 {
+        h.step();
+    }
+    assert_eq!(photo_up(&h), current, "the same slide is up");
+    let s = run(&mut h, "slideshow.togglePause", json!({}));
+    assert_ne!(s["view"], start, "{s}");
+    // the photo's cell moves; with an overlay drawn into the slide, the whole slide moves, so an
+    // overlay crossing the cell's edge stays in one piece
+    let part = |h: &Headless| {
+        let tex = h.app.renderer.textures.get(&Slot::Slide(current.into())).unwrap();
+        crate::panels::slideshow::moving_part(&h.app, current.into(), tex)
+    };
+    let cell = part(&h);
+    assert!(cell.min.x > 0.05 && cell.max.x < 0.95 && cell.min.y > 0.05 && cell.max.y < 0.95, "{cell:?}");
+    run(&mut h, "slideshow.overlays", json!({"ratingStars": {"enabled": true}}));
+    assert_eq!(part(&h), egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)));
+    run(&mut h, "slideshow.overlays", json!({"ratingStars": {"enabled": false}}));
+    run(&mut h, "slideshow.end", json!({}));
+    // off: the photo shows whole, so the same slide paints other pixels in its cell
+    run(&mut h, "slideshow.playback", json!({"panAndZoom": false}));
+    run(&mut h, "library.select", json!({"ids": [current.0]}));
+    run(&mut h, "view.slideshow", json!({"interval": 60, "fadeDuration": 0, "manual": true}));
+    assert_eq!(photo_up(&h), current);
+    assert!(h.step_until(SETTLE, |h| has_slide(h, current)));
+    h.step();
+    let s = run(&mut h, "slideshow.togglePause", json!({}));
+    assert_eq!((s["panAndZoom"].clone(), s["view"].clone()), (json!(false), json!(null)), "{s}");
+    let still = h.paint();
+    let mut changed = 0;
+    for y in (100..600).step_by(4) {
+        for x in (100..900).step_by(4) {
+            if painted(&moving, x, y) != painted(&still, x, y) {
+                changed += 1;
+            }
+        }
+    }
+    assert!(changed > 500, "the zoomed photo differs from the whole one ({changed} samples)");
+    assert_eq!(painted(&still, 5, 5), [255, 0, 0]);
+    run(&mut h, "slideshow.end", json!({}));
+    // the Settings controls
+    run(&mut h, "view.slideshowOptions", json!({}));
+    h.step();
+    reveal(&mut h, "check:settings.slideshowPanAndZoom");
+    assert!(latest_widget_rect(&h, "slider:slideshowPanAndZoom").is_some(), "the Low to High slider");
+    let r = h.request("ui.clickWidget", json!({"id": "check:settings.slideshowPanAndZoom"}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    h.step();
+    assert!(h.app.session.slideshow.pan_and_zoom, "the checkbox goes through slideshow.playback");
+    h.settle(SETTLE);
+}
+
+#[test]
 fn random_order_starts_at_the_selection_and_is_fixed_by_the_seed() {
     let order = |seed: u64| {
         let mut h = grid();
