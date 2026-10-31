@@ -138,10 +138,10 @@ fn keywording(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         crate::panels::keywording::view_switch(app, ui);
         ui.add_space(4.0);
         crate::panels::keywording::scope(app, ui, &selection);
-        if app.ui.keywording_view == crate::state::KeywordingView::Keywords {
-            crate::panels::keywording::chip_row(app, ui, &selection);
-        } else {
-            crate::panels::keywording::names_row(app, ui);
+        match app.ui.keywording_view {
+            crate::state::KeywordingView::Enter => enter_keywords(app, ui, &selection),
+            crate::state::KeywordingView::Keywords => crate::panels::keywording::chip_row(app, ui, &selection),
+            _ => crate::panels::keywording::names_row(app, ui),
         }
         ui.add_space(10.0);
         keyword_set(app, ui);
@@ -198,6 +198,101 @@ fn keywording(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     });
 }
 
+/// An edit of the Enter Keywords box: its text, and the selection it was started on.
+#[derive(Clone)]
+struct EnterEdit {
+    text: String,
+    /// The selection's keywords when the edit started.
+    start: Vec<crate::panels::keywording::Chip>,
+    /// The photos the edit is for (`photo.setMeta` `ids`).
+    ids: Vec<u64>,
+    /// The selection the edit was started on (`key_of`).
+    selection: u64,
+    /// The last try to apply it was refused: the text stays to be put right.
+    refused: bool,
+}
+
+impl EnterEdit {
+    fn new(chips: &[crate::panels::keywording::Chip], selection: &[PhotoId], key: u64) -> Self {
+        let mut seen = std::collections::HashSet::new();
+        EnterEdit {
+            text: crate::panels::keywording::entered_text(chips),
+            start: chips.to_vec(),
+            ids: selection.iter().filter(|id| seen.insert(**id)).map(|id| id.0).collect(),
+            selection: key,
+            refused: false,
+        }
+    }
+}
+
+/// Enter Keywords: the selection's keywords as text, separated by commas, one only some of the
+/// photos have marked with an asterisk. Return or leaving the box applies the edit to the photos
+/// selected when it started, as one undo step; Esc gives it up. Another selection while the box is
+/// being edited gives the edit up too. A refused edit keeps its text and says why.
+fn enter_keywords(app: &mut LightcraftApp, ui: &mut egui::Ui, selection: &[PhotoId]) {
+    const FIELD: &str = "field:enterKeywords";
+    let id = egui::Id::unique("kw-enter");
+    let key = crate::key_of(selection);
+    let chips = app.caches.keyword_chips(&app.session.catalog, selection);
+    let fid = crate::text_field::id(FIELD);
+    let focused = ui.memory(|m| m.has_focus(fid));
+    let kept: Option<EnterEdit> = ui.data(|d| d.get_temp(id));
+    // (an edit of another selection is given up, never applied to this one)
+    if kept.as_ref().is_some_and(|e| e.selection != key) && focused {
+        ui.memory_mut(|m| m.surrender_focus(fid));
+    }
+    let mut edit = kept.filter(|e| e.selection == key).unwrap_or_else(|| EnterEdit::new(&chips, selection, key));
+    // Return applies the edit (Shift+Return or a pasted line break separates keywords as a comma does)
+    let returned = focused
+        && ui.input_mut(|i| {
+            let plain =
+                |e: &egui::Event| matches!(e, egui::Event::Key { key: egui::Key::Enter, pressed: true, modifiers, .. } if modifiers.is_none());
+            let found = i.events.iter().any(plain);
+            i.events.retain(|e| !plain(e));
+            found
+        });
+    let r = crate::text_field::TextField::multiline(FIELD, &mut edit.text)
+        .hint(crate::i18n::tr("Keywords, separated by commas"))
+        .label(crate::i18n::tr("Enter Keywords"))
+        .rows(2)
+        .width(f32::INFINITY)
+        .show(ui);
+    r.response.clone().on_hover_text(crate::i18n::tr(
+        "Return applies the edit to the selected photos; Esc gives it up. An asterisk marks a keyword only some of them have.",
+    ));
+    if r.cancelled() {
+        ui.data_mut(|d| d.remove::<EnterEdit>(id));
+        return;
+    }
+    let mut done = false;
+    if returned || r.committed() {
+        let applied = match crate::panels::keywording::entered(&app.session.catalog, &edit.start, &edit.text) {
+            Ok(change) if change.is_empty() => true,
+            Ok(change) => match app.run("photo.setMeta", json!({"ids": edit.ids, "addKeywords": change.add, "removeKeywords": change.remove})) {
+                Ok(_) => true,
+                Err(e) => {
+                    app.toast_error(ui.ctx(), e);
+                    false
+                }
+            },
+            Err(name) => {
+                app.toast_error(ui.ctx(), crate::i18n::tr_format!("A keyword name can't end with an asterisk: “{name}”", name = name));
+                false
+            }
+        };
+        edit.refused = !applied;
+        done = applied;
+        if applied && returned {
+            ui.memory_mut(|m| m.surrender_focus(fid));
+        }
+    }
+    if !done && (r.editing || returned || edit.refused) {
+        ui.data_mut(|d| d.insert_temp(id, edit));
+    } else {
+        ui.data_mut(|d| d.remove::<EnterEdit>(id));
+    }
+}
+
 /// Keeps the Keyword List where it is on screen when the Keywords box above it (starting at
 /// `top`) grows or shrinks: a keyword ticked or unticked in the list, another selection. Without it
 /// a long tree slides away from under the pointer by a row of chips each time. It holds only while
@@ -218,7 +313,7 @@ fn hold_list_in_place(ui: &mut egui::Ui, top: f32) {
     // (only the part of it in sight: the pointer on the top bar above a half-hidden box isn't on it)
     let old_box = Rect::from_x_y_ranges(ui.max_rect().x_range(), top..=top + before).intersect(ui.clip_rect());
     let on_box = ui.input(|i| i.pointer.latest_pos()).is_some_and(|p| old_box.contains(p));
-    let typing = ui.memory(|m| m.has_focus(crate::text_field::id("field:keyword")));
+    let typing = ui.memory(|m| ["field:keyword", "field:enterKeywords"].iter().any(|f| m.has_focus(crate::text_field::id(f))));
     if on_box || typing {
         return;
     }

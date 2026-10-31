@@ -9,14 +9,17 @@ use crate::LightcraftApp;
 use crate::theme::Tokens;
 use crate::widgets::register;
 
-/// The Keywording box's view: the keywords (chips), them with the keywords containing them, or
-/// what exported files will carry.
+/// The Keywording box's view: the keywords as text (Enter Keywords), the keywords (chips), them
+/// with the keywords containing them, or what exported files will carry.
 pub fn view_switch(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     use crate::state::KeywordingView as V;
     ui.horizontal_wrapped(|ui| {
-        for (view, id, label) in
-            [(V::Keywords, "keywords", "Keywords"), (V::Containing, "containing", "& Containing"), (V::WillExport, "willExport", "Will Export")]
-        {
+        for (view, id, label) in [
+            (V::Enter, "enter", "Enter Keywords"),
+            (V::Keywords, "keywords", "Keywords"),
+            (V::Containing, "containing", "& Containing"),
+            (V::WillExport, "willExport", "Will Export"),
+        ] {
             let r = ui.selectable_label(app.ui.keywording_view == view, crate::i18n::tr(label));
             register(ui, format!("keywordView:{id}"), r.rect);
             if r.clicked() {
@@ -708,6 +711,62 @@ pub(crate) fn chips(catalog: &Catalog, photos: &[PhotoId]) -> Vec<Chip> {
     have.into_values().map(|(k, n)| Chip { path: catalog.listed_path(&k).map(str::to_string).unwrap_or(k), have: n, of: photos.len() }).collect()
 }
 
+/// The Enter Keywords text of the selection's keywords `chips`: each keyword's path, with commas
+/// between them and an asterisk after a keyword only some of the selected photos have.
+pub(crate) fn entered_text(chips: &[Chip]) -> String {
+    chips.iter().map(|c| if c.on_all() { c.path.clone() } else { format!("{}*", c.path) }).collect::<Vec<_>>().join(", ")
+}
+
+/// What an edit of the Enter Keywords text gives to and takes off the selected photos.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Entered {
+    /// Keywords for every selected photo.
+    pub add: Vec<String>,
+    /// Keywords taken off every selected photo.
+    pub remove: Vec<String>,
+}
+
+impl Entered {
+    /// The edit changes no photo.
+    pub fn is_empty(&self) -> bool {
+        self.add.is_empty() && self.remove.is_empty()
+    }
+}
+
+/// Reads the Enter Keywords `text` against `start`, the selection's keywords when the edit began.
+/// Keywords are separated by commas or new lines. A keyword of `start` left out of the text is
+/// taken off every selected photo. A name without an asterisk goes to every selected photo (a
+/// keyword of `start` keeps its spelling, and a new name goes where `Catalog::typed_keyword` puts
+/// it). A keyword only some photos have, still marked with its asterisk, stays on those photos
+/// only. An asterisk after any other name is refused: the error is the name as typed.
+pub(crate) fn entered(catalog: &Catalog, start: &[Chip], text: &str) -> Result<Entered, String> {
+    use lightcraft_catalog::keywords::{clean, same};
+    let mut kept: Vec<String> = Vec::new();
+    let mut add: Vec<String> = Vec::new();
+    for token in text.split([',', '\n']).map(str::trim).filter(|t| !t.is_empty()) {
+        if let Some(marked) = token.strip_suffix('*') {
+            let name = clean(marked);
+            let partial = start.iter().find(|c| !c.on_all() && same(&c.path, &name)).ok_or_else(|| token.to_string())?;
+            kept.push(partial.path.clone());
+            continue;
+        }
+        let typed = clean(token);
+        let (name, on_all) = match start.iter().find(|c| same(&c.path, &typed)) {
+            Some(c) => (c.path.clone(), c.on_all()),
+            None => (catalog.typed_keyword(token), false),
+        };
+        if name.is_empty() {
+            continue;
+        }
+        if !on_all && !add.iter().any(|a| same(a, &name)) {
+            add.push(name.clone());
+        }
+        kept.push(name);
+    }
+    let remove = start.iter().filter(|c| !kept.iter().any(|k| same(k, &c.path))).map(|c| c.path.clone()).collect();
+    Ok(Entered { add, remove })
+}
+
 #[cfg(test)]
 mod tests {
     use lightcraft_catalog::{Op, Photo, Source};
@@ -1006,5 +1065,74 @@ mod tests {
     fn containing_keywords_are_every_level() {
         let (c, ids) = library(&[&["travel|Italy|Rome", "travel|Spain"], &["travel|Italy"]]);
         assert_eq!(shown(&with_containing(&c, &ids)), [("Italy", 2, 2), ("Rome", 1, 2), ("Spain", 1, 2), ("travel", 2, 2)]);
+    }
+
+    fn edit(add: &[&str], remove: &[&str]) -> Entered {
+        Entered { add: add.iter().map(|s| s.to_string()).collect(), remove: remove.iter().map(|s| s.to_string()).collect() }
+    }
+
+    /// The Enter Keywords text is the selection's keywords with their paths, commas between them, and
+    /// an asterisk after one only some of the selected photos have; left as it is, it changes nothing.
+    #[test]
+    fn the_entered_text_is_the_selections_keywords() {
+        let (c, ids) = library(&[&["Places|Lisbon", "beach"], &["beach"]]);
+        let start = chips(&c, &ids);
+        let text = entered_text(&start);
+        assert_eq!(text, "beach, Places|Lisbon*");
+        assert_eq!(entered(&c, &start, &text), Ok(Entered::default()));
+        assert_eq!(entered(&c, &start, " beach ,\nPlaces | Lisbon * "), Ok(Entered::default()), "spaces and new lines");
+        assert_eq!(entered(&c, &start, "BEACH, places|lisbon*"), Ok(Entered::default()), "another case is the same keyword");
+        assert_eq!(entered_text(&[]), "");
+    }
+
+    /// A keyword left out of the text is taken off every selected photo; a name typed goes to every
+    /// one of them; a partial keyword without its asterisk goes to all of them.
+    #[test]
+    fn an_edit_adds_and_removes_for_every_selected_photo() {
+        let (c, ids) = library(&[&["Places|Lisbon", "beach"], &["beach", "sea"]]);
+        let start = chips(&c, &ids);
+        assert_eq!(entered(&c, &start, "Places|Lisbon*, sea*"), Ok(edit(&[], &["beach"])));
+        assert_eq!(entered(&c, &start, "beach, Places|Lisbon*, sea*, harbour, Places|Porto"), Ok(edit(&["harbour", "Places|Porto"], &[])));
+        assert_eq!(entered(&c, &start, "beach, Places|Lisbon, sea*"), Ok(edit(&["Places|Lisbon"], &[])), "made common");
+        assert_eq!(entered(&c, &start, "beach, harbour, HARBOUR"), Ok(edit(&["harbour"], &["Places|Lisbon", "sea"])), "named once");
+        assert_eq!(entered(&c, &start, ""), Ok(edit(&[], &["beach", "Places|Lisbon", "sea"])), "an empty box clears them");
+        assert_eq!(entered(&c, &start, " , | ,"), Ok(edit(&[], &["beach", "Places|Lisbon", "sea"])), "nothing but separators");
+    }
+
+    /// Containing keywords and synonyms are not part of the text: they stay derived, and an edit
+    /// never assigns them.
+    #[test]
+    fn containing_keywords_and_synonyms_stay_out_of_the_text() {
+        use lightcraft_catalog::keywords::KeywordInfo;
+        let (mut c, ids) = library(&[&["Places|Lisbon"]]);
+        c.apply(Op::SetKeyword {
+            path: "Places|Lisbon".into(),
+            info: Some(KeywordInfo { synonyms: vec!["Lisboa".into()], ..KeywordInfo::default() }),
+        })
+        .unwrap();
+        let start = chips(&c, &ids);
+        assert_eq!(entered_text(&start), "Places|Lisbon");
+        assert_eq!(entered(&c, &start, &entered_text(&start)), Ok(Entered::default()));
+    }
+
+    /// An asterisk marks a keyword only some photos have; after any other name it is refused, and the
+    /// error names what was typed.
+    #[test]
+    fn an_asterisk_after_another_name_is_refused() {
+        let (c, ids) = library(&[&["beach", "sea"], &["beach"]]);
+        let start = chips(&c, &ids);
+        assert_eq!(entered(&c, &start, "beach*, sea*"), Err("beach*".to_string()), "every photo has beach");
+        assert_eq!(entered(&c, &start, "beach, sea*, harbour*"), Err("harbour*".to_string()), "a new name");
+        assert_eq!(entered(&c, &start, "beach, *"), Err("*".to_string()));
+    }
+
+    /// A new name goes inside the default parent, as one typed in the Add keyword box does.
+    #[test]
+    fn a_new_name_goes_inside_the_default_parent() {
+        use lightcraft_catalog::keywords::KeywordInfo;
+        let (mut c, ids) = library(&[&["beach"]]);
+        c.apply(Op::SetKeyword { path: "Inbox".into(), info: Some(KeywordInfo { new_keywords_inside: true, ..KeywordInfo::default() }) }).unwrap();
+        let start = chips(&c, &ids);
+        assert_eq!(entered(&c, &start, "beach, harbour"), Ok(edit(&["Inbox|harbour"], &[])));
     }
 }
