@@ -1041,6 +1041,30 @@ fn enter_keywords_applies_an_edit_when_another_view_is_chosen() {
     assert!(all_have(&h, &ids, "harbour"), "the refused text came back to be put right");
 }
 
+/// Folding the Keywords box while typing applies the edit, as leaving the box does; so does hiding
+/// its panel, once the box is shown again for the same photos.
+#[test]
+fn enter_keywords_applies_an_edit_when_the_box_is_folded_or_hidden() {
+    let (mut h, ids) = two_selected();
+    enter(&mut h, "beach, Weddings*, sea");
+    ask(&mut h, "ui.clickWidget", json!({"id": "section:keywording"}));
+    assert!(!has(&h, "field:enterKeywords"), "the box is folded");
+    assert!(all_have(&h, &ids, "sea"), "folding the box applied it");
+    ask(&mut h, "ui.clickWidget", json!({"id": "section:keywording"}));
+    enter(&mut h, "beach, Weddings*, sea, harbour");
+    h.app.ui.toggle_folded("keywording");
+    h.step();
+    assert!(all_have(&h, &ids, "harbour"), "folded without a click, it applied it");
+    h.app.ui.toggle_folded("keywording");
+    h.step();
+    enter(&mut h, "beach, Weddings*, sea, harbour, pier");
+    ask(&mut h, "ui.set", json!({"right": "info"}));
+    h.step();
+    ask(&mut h, "ui.set", json!({"right": "keywords"}));
+    h.step();
+    assert!(all_have(&h, &ids, "pier"), "hiding the box with its panel applied it when it came back");
+}
+
 /// An asterisk after a name that is not a keyword only some photos have is refused: the photos keep
 /// their keywords, the box keeps the cursor and its text, and the refusal is said.
 #[test]

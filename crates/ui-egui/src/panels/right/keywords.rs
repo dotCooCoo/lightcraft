@@ -8,6 +8,10 @@ pub(super) fn keywords(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) 
     let top = ui.cursor().top();
     if fold_header(app, ui, "keywording", "Keywords") {
         keywording(app, ui);
+    } else if ui.data(|d| d.get_temp::<EnterEdit>(enter_id())).is_some_and(|e| !e.refused) {
+        // a folded box applies the Enter Keywords edit it held, as leaving the box does
+        let selection = app.session.selected();
+        leave_enter_keywords(app, ui, &selection);
     }
     hold_list_in_place(ui, top);
     crate::panels::keyword_list::show(app, ui);
@@ -272,8 +276,9 @@ fn leave_enter_keywords(app: &mut LightcraftApp, ui: &mut egui::Ui, selection: &
 }
 
 /// Enter Keywords: the selection's keywords as text, separated by commas, one only some of the
-/// photos have marked with an asterisk. Return, leaving the box or choosing another view applies
-/// the edit to the photos selected when it started, as one undo step; Esc gives it up. Another
+/// photos have marked with an asterisk. Return, leaving the box, choosing another view or folding
+/// the box applies the edit to the photos selected when it started, as one undo step; Esc gives it
+/// up. An edit whose box was hidden with its panel is applied when the box is next drawn. Another
 /// selection while the box is being edited gives the edit up too. A refused edit keeps its text and
 /// says why.
 fn enter_keywords(app: &mut LightcraftApp, ui: &mut egui::Ui, selection: &[PhotoId]) {
@@ -287,6 +292,8 @@ fn enter_keywords(app: &mut LightcraftApp, ui: &mut egui::Ui, selection: &[Photo
     if kept.as_ref().is_some_and(|e| e.selection != key) && focused {
         ui.memory_mut(|m| m.surrender_focus(fid));
     }
+    // (an edit kept without the cursor lost it while the box was not drawn, its panel hidden)
+    let left_undrawn = !focused && kept.as_ref().is_some_and(|e| e.selection == key && !e.refused);
     let mut edit = kept.filter(|e| e.selection == key).unwrap_or_else(|| EnterEdit::new(&chips, selection, key));
     // Return applies the edit (Shift+Return or a pasted line break separates keywords as a comma does)
     let returned = focused
@@ -311,7 +318,8 @@ fn enter_keywords(app: &mut LightcraftApp, ui: &mut egui::Ui, selection: &[Photo
         return;
     }
     let mut done = false;
-    if returned || r.committed() {
+    // (applied as leaving the box applies it)
+    if returned || r.committed() || (left_undrawn && !r.editing) {
         let applied = apply_enter(app, ui.ctx(), &edit);
         edit.refused = !applied;
         done = applied;

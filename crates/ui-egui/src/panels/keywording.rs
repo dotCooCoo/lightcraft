@@ -753,9 +753,10 @@ impl Entered {
 }
 
 /// The names in the Enter Keywords `text`, trimmed: the text split at commas and new lines, except
-/// where pieces joined by their separators spell a keyword of `start` whose name holds a comma or a
-/// new line (with or without its asterisk or its quotes) that the text has not named yet, which
-/// stays one name.
+/// where a name opened with a double quote closes with one after commas (the next piece holding a
+/// double quote ends with it), or where pieces joined by their separators spell a keyword of
+/// `start` whose name holds a comma or a new line (with or without its asterisk or its quotes) that
+/// the text has not named yet. Either stays one name.
 fn entered_names<'a>(start: &[Chip], text: &'a str) -> Vec<&'a str> {
     use lightcraft_catalog::keywords::{clean, same};
     let is_separator = |ch: char| ch == ',' || ch == '\n';
@@ -770,20 +771,37 @@ fn entered_names<'a>(start: &[Chip], text: &'a str) -> Vec<&'a str> {
         pieces.push(from..from + piece.len());
         from += piece.len() + 1;
     }
+    let piece = |p: &std::ops::Range<usize>| text.get(p.clone()).unwrap_or_default().trim();
     let mut names = Vec::new();
     let mut i = 0;
     while let Some(first) = pieces.get(i) {
-        // the most pieces that spell a keyword with separators not named yet
-        let joined = start
-            .iter()
-            .map(|c| c.path.matches(is_separator).count())
-            .filter(|&separators| separators > 0)
-            .filter_map(|separators| {
-                let last = pieces.get(i + separators)?;
-                let s = text.get(first.start..last.end)?.trim();
-                unnamed(s, &named).map(|_| (separators, s))
+        // a name in double quotes, up to the piece that closes it (an unclosed one is plain pieces)
+        let opened = piece(first).starts_with('"') && quoted(piece(first)).is_none();
+        let quoted_run = opened
+            .then(|| {
+                pieces
+                    .iter()
+                    .enumerate()
+                    .skip(i + 1)
+                    .take_while(|(_, p)| p.start.checked_sub(1).and_then(|b| text.as_bytes().get(b)) == Some(&b','))
+                    .find(|(_, p)| piece(p).contains('"'))
+                    .filter(|(_, p)| piece(p).ends_with('"'))
+                    .and_then(|(j, p)| Some((j - i, text.get(first.start..p.end)?.trim())))
             })
-            .max_by_key(|&(separators, _)| separators);
+            .flatten();
+        // else the most pieces that spell a keyword with separators not named yet
+        let joined = quoted_run.or_else(|| {
+            start
+                .iter()
+                .map(|c| c.path.matches(is_separator).count())
+                .filter(|&separators| separators > 0)
+                .filter_map(|separators| {
+                    let last = pieces.get(i + separators)?;
+                    let s = text.get(first.start..last.end)?.trim();
+                    unnamed(s, &named).map(|_| (separators, s))
+                })
+                .max_by_key(|&(separators, _)| separators)
+        });
         let (separators, name) = joined.unwrap_or((0, text.get(first.clone()).unwrap_or_default().trim()));
         if let Some(n) = unnamed(name, &named) {
             named[n] = true;
@@ -797,11 +815,12 @@ fn entered_names<'a>(start: &[Chip], text: &'a str) -> Vec<&'a str> {
 }
 
 /// Reads the Enter Keywords `text` against `start`, the selection's keywords when the edit began.
-/// Keywords are separated by commas or new lines; a keyword of `start` whose name holds a comma is
-/// read as one name. A keyword of `start` left out of the text is taken off every selected photo.
-/// A name without an asterisk goes to every selected photo (a keyword of `start` keeps its
-/// spelling, and a new name goes where `Catalog::typed_keyword` puts it). A keyword only some
-/// photos have, still marked with its asterisk, stays on those photos only. A name in double
+/// Keywords are separated by commas or new lines; a keyword of `start` whose name holds a comma, and
+/// a name in double quotes holding commas, are each read as one name. A keyword of `start` left out
+/// of the text is taken off every selected photo. A name without an asterisk goes to every
+/// selected photo (a keyword of `start` keeps its spelling, and a new name goes where
+/// `Catalog::typed_keyword` puts it). A keyword only some photos have, still marked with its
+/// asterisk, stays on those photos only. A name in double
 /// quotes is read as written, an asterisk at its end included. A keyword every photo has whose own
 /// name ends in an asterisk is also kept when written without its quotes, unless a keyword only
 /// some photos have reads the same. An asterisk after any other name is refused: the error is the
@@ -1228,6 +1247,19 @@ mod tests {
         assert_eq!(entered(&c, &start, &entered_text(&start)), Ok(Entered::default()));
         assert_eq!(entered(&c, &start, "a, b, a, b"), Ok(Entered::default()), "reordered");
         assert_eq!(entered(&c, &start, "a, b, a"), Ok(edit(&[], &["b"])));
+    }
+
+    /// A name in double quotes holding a comma is read as one name, whether the selection, the
+    /// library or neither has it; an unclosed quote leaves the pieces apart.
+    #[test]
+    fn a_quoted_name_with_a_comma_is_one_name() {
+        let (c, ids) = library(&[&["beach"], &["beach"], &["Places|Rome, Italy"]]);
+        let start = chips(&c, &ids[..2]);
+        assert_eq!(entered(&c, &start, "beach, \"Paris, France\""), Ok(edit(&["Paris, France"], &[])), "a new name");
+        assert_eq!(entered(&c, &start, " \"Places|Rome, Italy\" ,beach"), Ok(edit(&["Places|Rome, Italy"], &[])), "in the library");
+        assert_eq!(entered(&c, &start, "\"a, b, c\""), Ok(edit(&["a, b, c"], &["beach"])));
+        assert_eq!(entered(&c, &start, "beach, \"Paris, France"), Ok(edit(&["\"Paris", "France"], &[])), "unclosed");
+        assert_eq!(entered(&c, &start, "\"Paris\nFrance\", beach"), Ok(edit(&["\"Paris", "France\""], &[])), "not across a new line");
     }
 
     /// A keyword whose name holds a new line is read as one name, as one holding a comma is.
