@@ -1065,6 +1065,29 @@ fn enter_keywords_applies_an_edit_when_the_box_is_folded_or_hidden() {
     assert!(all_have(&h, &ids, "pier"), "hiding the box with its panel applied it when it came back");
 }
 
+/// An edit kept while its box was hidden with its panel is given up when another library is open
+/// by the time the box is drawn or folded again: that library's photos with the same ids keep their
+/// keywords.
+#[test]
+fn enter_keywords_gives_up_an_edit_when_another_library_opens() {
+    for folded in [false, true] {
+        let (mut h, ids) = two_selected();
+        enter(&mut h, "beach, Weddings*, pier");
+        ask(&mut h, "ui.set", json!({"right": "info"}));
+        h.step();
+        h.app.session = lightcraft_engine::Session::with_demo();
+        ask(&mut h, "engine.execute", json!({"command": "library.select", "params": {"ids": ids}}));
+        let before: Vec<Vec<String>> = ids.iter().map(|id| keywords_of(&h, *id)).collect();
+        if folded {
+            h.app.ui.toggle_folded("keywording");
+        }
+        ask(&mut h, "ui.set", json!({"right": "keywords"}));
+        h.step();
+        let after: Vec<Vec<String>> = ids.iter().map(|id| keywords_of(&h, *id)).collect();
+        assert_eq!(after, before, "the other library's photos keep their keywords (box folded: {folded})");
+    }
+}
+
 /// An asterisk after a name that is not a keyword only some photos have is refused: the photos keep
 /// their keywords, the box keeps the cursor and its text, and the refusal is said.
 #[test]

@@ -216,20 +216,29 @@ struct EnterEdit {
     ids: Vec<u64>,
     /// The selection the edit was started on (`key_of`).
     selection: u64,
+    /// The library the edit was started in ([`lightcraft_engine::Session::library_generation`]):
+    /// photo ids are a library's own, so the same ids in another library are other photos.
+    library: u64,
     /// The last try to apply it was refused: the text stays to be put right.
     refused: bool,
 }
 
 impl EnterEdit {
-    fn new(chips: &[crate::panels::keywording::Chip], selection: &[PhotoId], key: u64) -> Self {
+    fn new(chips: &[crate::panels::keywording::Chip], selection: &[PhotoId], key: u64, library: u64) -> Self {
         let mut seen = std::collections::HashSet::new();
         EnterEdit {
             text: crate::panels::keywording::entered_text(chips),
             start: chips.to_vec(),
             ids: selection.iter().filter(|id| seen.insert(**id)).map(|id| id.0).collect(),
             selection: key,
+            library,
             refused: false,
         }
+    }
+
+    /// Whether the edit was started on `selection` (`key_of`) in the open library.
+    fn is_for(&self, app: &LightcraftApp, selection: u64) -> bool {
+        self.selection == selection && self.library == app.session.library_generation()
     }
 }
 
@@ -261,13 +270,14 @@ fn apply_enter(app: &mut LightcraftApp, ctx: &egui::Context, edit: &EnterEdit) -
 }
 
 /// Another view chosen while the Enter Keywords box holds an edit: the edit is applied, as leaving
-/// the box applies it, and the box gives up the cursor. An edit of another selection is given up.
-/// A refused edit is kept, marked refused, and comes back when Enter Keywords is chosen again.
+/// the box applies it, and the box gives up the cursor. An edit of another selection, or of another
+/// library, is given up. A refused edit is kept, marked refused, and comes back when Enter Keywords
+/// is chosen again.
 fn leave_enter_keywords(app: &mut LightcraftApp, ui: &mut egui::Ui, selection: &[PhotoId]) {
     let id = enter_id();
     ui.memory_mut(|m| m.surrender_focus(crate::text_field::id(ENTER_FIELD)));
     let Some(mut edit) = ui.data(|d| d.get_temp::<EnterEdit>(id)) else { return };
-    if edit.selection == crate::key_of(selection) && !apply_enter(app, ui.ctx(), &edit) {
+    if edit.is_for(app, crate::key_of(selection)) && !apply_enter(app, ui.ctx(), &edit) {
         edit.refused = true;
         ui.data_mut(|d| d.insert_temp(id, edit));
     } else {
@@ -279,22 +289,23 @@ fn leave_enter_keywords(app: &mut LightcraftApp, ui: &mut egui::Ui, selection: &
 /// photos have marked with an asterisk. Return, leaving the box, choosing another view or folding
 /// the box applies the edit to the photos selected when it started, as one undo step; Esc gives it
 /// up. An edit whose box was hidden with its panel is applied when the box is next drawn. Another
-/// selection while the box is being edited gives the edit up too. A refused edit keeps its text and
-/// says why.
+/// selection while the box is being edited, or another library opened, gives the edit up too. A
+/// refused edit keeps its text and says why.
 fn enter_keywords(app: &mut LightcraftApp, ui: &mut egui::Ui, selection: &[PhotoId]) {
     let id = enter_id();
     let key = crate::key_of(selection);
+    let library = app.session.library_generation();
     let chips = app.caches.keyword_chips(&app.session.catalog, selection);
     let fid = crate::text_field::id(ENTER_FIELD);
     let focused = ui.memory(|m| m.has_focus(fid));
     let kept: Option<EnterEdit> = ui.data(|d| d.get_temp(id));
-    // (an edit of another selection is given up, never applied to this one)
-    if kept.as_ref().is_some_and(|e| e.selection != key) && focused {
+    // (an edit of another selection or library is given up, never applied to this one)
+    if kept.as_ref().is_some_and(|e| !e.is_for(app, key)) && focused {
         ui.memory_mut(|m| m.surrender_focus(fid));
     }
     // (an edit kept without the cursor lost it while the box was not drawn, its panel hidden)
-    let left_undrawn = !focused && kept.as_ref().is_some_and(|e| e.selection == key && !e.refused);
-    let mut edit = kept.filter(|e| e.selection == key).unwrap_or_else(|| EnterEdit::new(&chips, selection, key));
+    let left_undrawn = !focused && kept.as_ref().is_some_and(|e| e.is_for(app, key) && !e.refused);
+    let mut edit = kept.filter(|e| e.is_for(app, key)).unwrap_or_else(|| EnterEdit::new(&chips, selection, key, library));
     // Return applies the edit (Shift+Return or a pasted line break separates keywords as a comma does)
     let returned = focused
         && ui.input_mut(|i| {
