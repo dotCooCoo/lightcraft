@@ -60,6 +60,12 @@ pub fn import_params(s: &Session, p: &Value) -> Result<ImportRequest> {
     {
         return Err(bad("library.import", format!("unknown metadata preset `{n}`")));
     }
+    // the chosen preset and the import defaults' preset (presets saved earlier are kept in prefs)
+    for n in metadata_preset.iter().chain(s.import_defaults.metadata_preset.iter()) {
+        if let Some(mp) = s.metadata_presets.iter().find(|m| m.name.eq_ignore_ascii_case(n)) {
+            crate::cmd::metadata::check_keywords(s, &mp.fields, "library.import")?;
+        }
+    }
     let on_deleted = match str_param(p, "onDeleted") {
         Some(v) => {
             crate::import::OnDeleted::parse(v).ok_or_else(|| bad("library.import", format!("unknown onDeleted `{v}` (restore|skip|fresh)")))?

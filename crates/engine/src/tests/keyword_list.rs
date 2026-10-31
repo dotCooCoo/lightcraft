@@ -65,8 +65,11 @@ fn commands_refuse_a_new_keyword_name_ending_in_an_asterisk() {
     s.execute("keyword.create", &json!({"name": "Lagoon", "parent": null})).unwrap();
     s.execute("keyword.saveSet", &json!({"name": "Mine", "keywords": ["Lagoon"]})).unwrap();
     for name in ["travel*", "places|rome*"] {
+        // a metadata preset in prefs that holds the name
+        s.metadata_presets = vec![crate::cmd::metadata::MetadataPreset { name: "Old".into(), fields: json!({"keywords": [name]}) }];
         let before = s.catalog.to_snapshot();
         let sets = s.keyword_sets.clone();
+        let presets = s.metadata_presets.clone();
         for (command, params) in [
             ("keyword.create", json!({"name": name, "parent": null})),
             ("keyword.edit", json!({"keyword": "Lagoon", "name": name.rsplit('|').next()})),
@@ -78,11 +81,18 @@ fn commands_refuse_a_new_keyword_name_ending_in_an_asterisk() {
             ("keyword.setShortcut", json!({"keywords": [name]})),
             ("keyword.saveSet", json!({"name": "Mine", "keywords": [name]})),
             ("library.import", json!({"paths": ["missing.jpg"], "keywords": [name]})),
+            ("metadata.savePreset", json!({"name": "Trip", "fields": {"keywords": ["Lagoon", name]}})),
+            ("library.import", json!({"paths": ["missing.jpg"], "metadataPreset": "Old"})),
         ] {
             let err = s.execute(command, &params).unwrap_err().to_string();
             assert!(err.contains("can't end in “*”"), "{command} {params}: {err}");
         }
-        assert!(s.catalog.to_snapshot() == before && s.keyword_sets == sets, "{name}: nothing changed");
+        // the import defaults' metadata preset
+        s.import_defaults.metadata_preset = Some("Old".into());
+        let err = s.execute("library.import", &json!({"paths": ["missing.jpg"]})).unwrap_err().to_string();
+        assert!(err.contains("can't end in “*”"), "import defaults: {err}");
+        s.import_defaults.metadata_preset = None;
+        assert!(s.catalog.to_snapshot() == before && s.keyword_sets == sets && s.metadata_presets == presets, "{name}: nothing changed");
     }
     s.execute("photo.setMeta", &json!({"addKeywords": ["a*b"]})).unwrap();
     assert!(ids.iter().all(|id| keywords_of(&s, *id).contains(&"a*b".to_string())));
