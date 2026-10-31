@@ -712,9 +712,28 @@ pub(crate) fn chips(catalog: &Catalog, photos: &[PhotoId]) -> Vec<Chip> {
 }
 
 /// The Enter Keywords text of the selection's keywords `chips`: each keyword's path, with commas
-/// between them and an asterisk after a keyword only some of the selected photos have.
+/// between them and an asterisk after a keyword only some of the selected photos have. A keyword
+/// every photo has whose name ends in an asterisk, or is itself in double quotes, is written in
+/// double quotes, so that it reads differently from a partial keyword marked with the asterisk.
 pub(crate) fn entered_text(chips: &[Chip]) -> String {
-    chips.iter().map(|c| if c.on_all() { c.path.clone() } else { format!("{}*", c.path) }).collect::<Vec<_>>().join(", ")
+    chips
+        .iter()
+        .map(|c| {
+            if !c.on_all() {
+                format!("{}*", c.path)
+            } else if c.path.ends_with('*') || quoted(&c.path).is_some() {
+                format!("\"{}\"", c.path)
+            } else {
+                c.path.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The name inside `token` when it is in double quotes.
+fn quoted(token: &str) -> Option<&str> {
+    token.strip_prefix('"')?.strip_suffix('"')
 }
 
 /// What an edit of the Enter Keywords text gives to and takes off the selected photos.
@@ -735,10 +754,14 @@ impl Entered {
 
 /// The names in the Enter Keywords `text`, trimmed: the text split at commas and new lines, except
 /// where pieces of one line joined by their commas spell a keyword of `start` whose name holds a
-/// comma (with or without its asterisk), which stays one name.
+/// comma (with or without its asterisk or its quotes) that the text has not named yet, which stays
+/// one name.
 fn entered_names<'a>(start: &[Chip], text: &'a str) -> Vec<&'a str> {
     use lightcraft_catalog::keywords::{clean, same};
-    let spells = |s: &str, c: &Chip| same(&clean(s), &c.path) || s.strip_suffix('*').is_some_and(|m| same(&clean(m), &c.path));
+    let spells = |s: &str, c: &Chip| [Some(s), s.strip_suffix('*'), quoted(s)].into_iter().flatten().any(|n| same(&clean(n), &c.path));
+    // the keywords of `start` the text has named so far
+    let mut named = vec![false; start.len()];
+    let unnamed = |s: &str, named: &[bool]| start.iter().zip(named).position(|(c, n)| !n && spells(s, c));
     let mut names = Vec::new();
     for line in text.split('\n') {
         // each piece's byte range in the line
@@ -750,7 +773,7 @@ fn entered_names<'a>(start: &[Chip], text: &'a str) -> Vec<&'a str> {
         }
         let mut i = 0;
         while let Some(first) = pieces.get(i) {
-            // the most pieces that spell a keyword with commas
+            // the most pieces that spell a keyword with commas not named yet
             let joined = start
                 .iter()
                 .map(|c| c.path.matches(',').count())
@@ -758,10 +781,13 @@ fn entered_names<'a>(start: &[Chip], text: &'a str) -> Vec<&'a str> {
                 .filter_map(|commas| {
                     let last = pieces.get(i + commas)?;
                     let s = line.get(first.start..last.end)?.trim();
-                    start.iter().any(|c| spells(s, c)).then_some((commas, s))
+                    unnamed(s, &named).map(|_| (commas, s))
                 })
                 .max_by_key(|&(commas, _)| commas);
             let (commas, name) = joined.unwrap_or((0, line.get(first.clone()).unwrap_or_default().trim()));
+            if let Some(n) = unnamed(name, &named) {
+                named[n] = true;
+            }
             if !name.is_empty() {
                 names.push(name);
             }
@@ -776,34 +802,39 @@ fn entered_names<'a>(start: &[Chip], text: &'a str) -> Vec<&'a str> {
 /// read as one name. A keyword of `start` left out of the text is taken off every selected photo.
 /// A name without an asterisk goes to every selected photo (a keyword of `start` keeps its
 /// spelling, and a new name goes where `Catalog::typed_keyword` puts it). A keyword only some
-/// photos have, still marked with its asterisk, stays on those photos only. A keyword every photo
-/// has whose own name ends in an asterisk is kept as it is. An asterisk after any other name is
-/// refused: the error is the name as typed.
+/// photos have, still marked with its asterisk, stays on those photos only. A name in double
+/// quotes is read as written, an asterisk at its end included. A keyword every photo has whose own
+/// name ends in an asterisk is also kept when written without its quotes, unless a keyword only
+/// some photos have reads the same. An asterisk after any other name is refused: the error is the
+/// name as typed.
 pub(crate) fn entered(catalog: &Catalog, start: &[Chip], text: &str) -> Result<Entered, String> {
     use lightcraft_catalog::keywords::{clean, same};
     let mut kept: Vec<String> = Vec::new();
     let mut add: Vec<String> = Vec::new();
     for token in entered_names(start, text) {
-        if let Some(marked) = token.strip_suffix('*') {
+        let literal = quoted(token);
+        if let Some(marked) = token.strip_suffix('*').filter(|_| literal.is_none()) {
             let (whole, name) = (clean(token), clean(marked));
-            // a keyword on every photo named with the asterisk, or a partial one marked; one not
-            // named yet first, when the text could mean either
+            // a partial keyword marked, or else a keyword on every photo named with the asterisk;
+            // one not named yet first
             let on_all = |c: &Chip| c.on_all() && same(&c.path, &whole);
             let partial = |c: &Chip| !c.on_all() && same(&c.path, &name);
             let fresh = |c: &Chip| !kept.iter().any(|k| same(k, &c.path));
             let found = start
                 .iter()
-                .find(|c| fresh(c) && on_all(c))
-                .or_else(|| start.iter().find(|c| fresh(c) && partial(c)))
-                .or_else(|| start.iter().find(|c| on_all(c) || partial(c)))
+                .find(|c| fresh(c) && partial(c))
+                .or_else(|| start.iter().find(|c| fresh(c) && on_all(c)))
+                .or_else(|| start.iter().find(|c| partial(c) || on_all(c)))
                 .ok_or_else(|| token.to_string())?;
             kept.push(found.path.clone());
             continue;
         }
-        let typed = clean(token);
+        let written = literal.unwrap_or(token);
+        let typed = clean(written);
         let (name, on_all) = match start.iter().find(|c| same(&c.path, &typed)) {
             Some(c) => (c.path.clone(), c.on_all()),
-            None => (catalog.typed_keyword(token), false),
+            None if typed.ends_with('*') => return Err(token.to_string()),
+            None => (catalog.typed_keyword(written), false),
         };
         if name.is_empty() {
             continue;
@@ -1191,21 +1222,38 @@ mod tests {
         let (c, ids) = library(&[&["Paris, France"]]);
         let start = chips(&c, &ids);
         assert_eq!(entered(&c, &start, &entered_text(&start)), Ok(Entered::default()), "on every photo");
+        // a name with a comma joins once; named again, its pieces are other keywords
+        let (c, ids) = library(&[&["a", "b", "a, b"]]);
+        let start = chips(&c, &ids);
+        assert_eq!(entered_text(&start), "a, a, b, b");
+        assert_eq!(entered(&c, &start, &entered_text(&start)), Ok(Entered::default()));
+        assert_eq!(entered(&c, &start, "a, b, a, b"), Ok(Entered::default()), "reordered");
+        assert_eq!(entered(&c, &start, "a, b, a"), Ok(edit(&[], &["b"])));
     }
 
-    /// A keyword on every photo whose own name ends in an asterisk is kept when the text is left as
-    /// it is; one only some photos have is marked with a second asterisk.
+    /// A keyword on every photo whose own name ends in an asterisk is written in quotes and kept when
+    /// the text is left as it is; one only some photos have is marked with a second asterisk.
     #[test]
     fn a_keyword_ending_in_an_asterisk_is_kept() {
         let (c, ids) = library(&[&["star*", "beach", "sea*"], &["star*", "beach"]]);
         let start = chips(&c, &ids);
         let text = entered_text(&start);
-        assert_eq!(text, "beach, sea**, star*");
+        assert_eq!(text, "beach, sea**, \"star*\"");
         assert_eq!(entered(&c, &start, &text), Ok(Entered::default()));
-        assert_eq!(entered(&c, &start, "beach, star*"), Ok(edit(&[], &["sea*"])));
-        // a partial `star` beside a common `star*`: both read the same, each is kept once
+        assert_eq!(entered(&c, &start, "beach, star*"), Ok(edit(&[], &["sea*"])), "without its quotes");
+        assert_eq!(entered(&c, &start, "beach, \"sea*\", \"star*\""), Ok(edit(&["sea*"], &[])), "a quoted partial goes to all");
+        assert_eq!(entered(&c, &start, "beach, \"harbour*\""), Err("\"harbour*\"".to_string()), "a new name with an asterisk");
+        // a partial `star` beside a common `star*`: each reads differently, and either can go
         let (c, ids) = library(&[&["star*", "star"], &["star*"]]);
         let start = chips(&c, &ids);
+        assert_eq!(entered_text(&start), "star*, \"star*\"");
+        assert_eq!(entered(&c, &start, &entered_text(&start)), Ok(Entered::default()));
+        assert_eq!(entered(&c, &start, "\"star*\""), Ok(edit(&[], &["star"])));
+        assert_eq!(entered(&c, &start, "star*"), Ok(edit(&[], &["star*"])));
+        // a keyword every photo has that is itself in quotes keeps them
+        let (c, ids) = library(&[&["\"quoted\""]]);
+        let start = chips(&c, &ids);
+        assert_eq!(entered_text(&start), "\"\"quoted\"\"");
         assert_eq!(entered(&c, &start, &entered_text(&start)), Ok(Entered::default()));
     }
 
