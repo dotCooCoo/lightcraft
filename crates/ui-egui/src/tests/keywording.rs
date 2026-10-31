@@ -1015,6 +1015,32 @@ fn enter_keywords_escape_gives_up_and_leaving_applies() {
     assert!(all_have(&h, &ids, "sea"), "leaving the box applied it");
 }
 
+/// Choosing another view while typing applies the edit, as leaving the box does; Enter Keywords
+/// chosen again shows the photos' keywords, not the old text. A refused edit comes back with it.
+#[test]
+fn enter_keywords_applies_an_edit_when_another_view_is_chosen() {
+    let (mut h, ids) = two_selected();
+    enter(&mut h, "beach, Weddings*, sea");
+    ask(&mut h, "ui.clickWidget", json!({"id": "keywordView:containing"}));
+    assert!(all_have(&h, &ids, "sea"), "choosing another view applied it");
+    assert!(!enter_focused(&h));
+    ask(&mut h, "engine.execute", json!({"command": "photo.setMeta", "params": {"ids": [ids[1]], "removeKeywords": ["sea"]}}));
+    ask(&mut h, "ui.clickWidget", json!({"id": "keywordView:enter"}));
+    ask(&mut h, "ui.clickWidget", json!({"id": "field:enterKeywords"}));
+    ask(&mut h, "ui.key", json!({"key": "Enter"}));
+    assert_eq!(keywords_of(&h, ids[1]), ["beach"], "the old text did not come back to give sea again");
+    enter(&mut h, "beach, harbour*");
+    ask(&mut h, "ui.clickWidget", json!({"id": "keywordView:keywords"}));
+    assert!(h.app.ui.toast.as_ref().is_some_and(|(t, ..)| t.contains("harbour*")), "{:?}", h.app.ui.toast);
+    assert!(none_has(&h, &ids, "harbour"));
+    ask(&mut h, "ui.clickWidget", json!({"id": "keywordView:enter"}));
+    ask(&mut h, "ui.clickWidget", json!({"id": "field:enterKeywords"}));
+    ask(&mut h, "ui.key", json!({"key": "End", "cmd": true}));
+    ask(&mut h, "ui.key", json!({"key": "Backspace"}));
+    ask(&mut h, "ui.key", json!({"key": "Enter"}));
+    assert!(all_have(&h, &ids, "harbour"), "the refused text came back to be put right");
+}
+
 /// An asterisk after a name that is not a keyword only some photos have is refused: the photos keep
 /// their keywords, the box keeps the cursor and its text, and the refusal is said.
 #[test]

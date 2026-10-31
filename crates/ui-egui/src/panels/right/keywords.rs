@@ -135,7 +135,11 @@ fn keywording(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         }
         ui.data_mut(|d| d.insert_temp(kid, text));
         ui.add_space(8.0);
+        let view = app.ui.keywording_view;
         crate::panels::keywording::view_switch(app, ui);
+        if view == crate::state::KeywordingView::Enter && app.ui.keywording_view != view {
+            leave_enter_keywords(app, ui, &selection);
+        }
         ui.add_space(4.0);
         crate::panels::keywording::scope(app, ui, &selection);
         match app.ui.keywording_view {
@@ -225,16 +229,58 @@ impl EnterEdit {
     }
 }
 
+/// The Enter Keywords box's field.
+const ENTER_FIELD: &str = "field:enterKeywords";
+
+/// Where the Enter Keywords box keeps its edit between frames.
+fn enter_id() -> egui::Id {
+    egui::Id::unique("kw-enter")
+}
+
+/// Applies the Enter Keywords `edit` to the photos it was started on, as one undo step. Returns
+/// whether it was applied (an edit that changes nothing is); a refusal is said.
+fn apply_enter(app: &mut LightcraftApp, ctx: &egui::Context, edit: &EnterEdit) -> bool {
+    match crate::panels::keywording::entered(&app.session.catalog, &edit.start, &edit.text) {
+        Ok(change) if change.is_empty() => true,
+        Ok(change) => match app.run("photo.setMeta", json!({"ids": edit.ids, "addKeywords": change.add, "removeKeywords": change.remove})) {
+            Ok(_) => true,
+            Err(e) => {
+                app.toast_error(ctx, e);
+                false
+            }
+        },
+        Err(name) => {
+            app.toast_error(ctx, crate::i18n::tr_format!("A keyword name can't end with an asterisk: “{name}”", name = name));
+            false
+        }
+    }
+}
+
+/// Another view chosen while the Enter Keywords box holds an edit: the edit is applied, as leaving
+/// the box applies it, and the box gives up the cursor. An edit of another selection is given up.
+/// A refused edit is kept, marked refused, and comes back when Enter Keywords is chosen again.
+fn leave_enter_keywords(app: &mut LightcraftApp, ui: &mut egui::Ui, selection: &[PhotoId]) {
+    let id = enter_id();
+    ui.memory_mut(|m| m.surrender_focus(crate::text_field::id(ENTER_FIELD)));
+    let Some(mut edit) = ui.data(|d| d.get_temp::<EnterEdit>(id)) else { return };
+    if edit.selection == crate::key_of(selection) && !apply_enter(app, ui.ctx(), &edit) {
+        edit.refused = true;
+        ui.data_mut(|d| d.insert_temp(id, edit));
+    } else {
+        ui.data_mut(|d| d.remove::<EnterEdit>(id));
+    }
+}
+
 /// Enter Keywords: the selection's keywords as text, separated by commas, one only some of the
-/// photos have marked with an asterisk. Return or leaving the box applies the edit to the photos
-/// selected when it started, as one undo step; Esc gives it up. Another selection while the box is
-/// being edited gives the edit up too. A refused edit keeps its text and says why.
+/// photos have marked with an asterisk. Return, leaving the box or choosing another view applies
+/// the edit to the photos selected when it started, as one undo step; Esc gives it up. Another
+/// selection while the box is being edited gives the edit up too. A refused edit keeps its text and
+/// says why.
 fn enter_keywords(app: &mut LightcraftApp, ui: &mut egui::Ui, selection: &[PhotoId]) {
-    const FIELD: &str = "field:enterKeywords";
-    let id = egui::Id::unique("kw-enter");
+    let id = enter_id();
     let key = crate::key_of(selection);
     let chips = app.caches.keyword_chips(&app.session.catalog, selection);
-    let fid = crate::text_field::id(FIELD);
+    let fid = crate::text_field::id(ENTER_FIELD);
     let focused = ui.memory(|m| m.has_focus(fid));
     let kept: Option<EnterEdit> = ui.data(|d| d.get_temp(id));
     // (an edit of another selection is given up, never applied to this one)
@@ -251,7 +297,7 @@ fn enter_keywords(app: &mut LightcraftApp, ui: &mut egui::Ui, selection: &[Photo
             i.events.retain(|e| !plain(e));
             found
         });
-    let r = crate::text_field::TextField::multiline(FIELD, &mut edit.text)
+    let r = crate::text_field::TextField::multiline(ENTER_FIELD, &mut edit.text)
         .hint(crate::i18n::tr("Keywords, separated by commas"))
         .label(crate::i18n::tr("Enter Keywords"))
         .rows(2)
@@ -266,20 +312,7 @@ fn enter_keywords(app: &mut LightcraftApp, ui: &mut egui::Ui, selection: &[Photo
     }
     let mut done = false;
     if returned || r.committed() {
-        let applied = match crate::panels::keywording::entered(&app.session.catalog, &edit.start, &edit.text) {
-            Ok(change) if change.is_empty() => true,
-            Ok(change) => match app.run("photo.setMeta", json!({"ids": edit.ids, "addKeywords": change.add, "removeKeywords": change.remove})) {
-                Ok(_) => true,
-                Err(e) => {
-                    app.toast_error(ui.ctx(), e);
-                    false
-                }
-            },
-            Err(name) => {
-                app.toast_error(ui.ctx(), crate::i18n::tr_format!("A keyword name can't end with an asterisk: “{name}”", name = name));
-                false
-            }
-        };
+        let applied = apply_enter(app, ui.ctx(), &edit);
         edit.refused = !applied;
         done = applied;
         if applied && returned {
@@ -313,7 +346,7 @@ fn hold_list_in_place(ui: &mut egui::Ui, top: f32) {
     // (only the part of it in sight: the pointer on the top bar above a half-hidden box isn't on it)
     let old_box = Rect::from_x_y_ranges(ui.max_rect().x_range(), top..=top + before).intersect(ui.clip_rect());
     let on_box = ui.input(|i| i.pointer.latest_pos()).is_some_and(|p| old_box.contains(p));
-    let typing = ui.memory(|m| ["field:keyword", "field:enterKeywords"].iter().any(|f| m.has_focus(crate::text_field::id(f))));
+    let typing = ui.memory(|m| ["field:keyword", ENTER_FIELD].iter().any(|f| m.has_focus(crate::text_field::id(f))));
     if on_box || typing {
         return;
     }
