@@ -375,6 +375,77 @@ fn pan_and_zoom_moves_the_photo_inside_its_cell() {
     h.settle(SETTLE);
 }
 
+/// While a slide's new render (after a layout change) is on the way, the old texture moves
+/// whole: its cell is where the old settings put it, not where the new ones do.
+#[test]
+fn pan_and_zoom_moves_an_old_render_whole_until_the_new_one_lands() {
+    let mut h = grid();
+    let open = Rc::new(Cell::new(true));
+    h.app.renderer.set_offload(Box::new(RenderGate::new(open.clone())));
+    run(&mut h, "slideshow.layout", json!({"margins": 0.1}));
+    run(&mut h, "slideshow.playback", json!({"panAndZoom": true, "panAndZoomAmount": 1.0}));
+    run(&mut h, "view.slideshow", json!({"interval": 60, "fadeDuration": 0, "manual": true, "seed": 3}));
+    let current = photo_up(&h);
+    let slot = Slot::Slide(current.into());
+    assert!(h.step_until(SETTLE, |h| has_slide(h, current) && h.app.renderer.wanted(slot) == h.app.renderer.textures.get(&slot).map(|t| t.key)));
+    let part = |h: &Headless| {
+        let tex = h.app.renderer.textures.get(&slot).unwrap();
+        crate::panels::slideshow::moving_part(&h.app, current.into(), tex)
+    };
+    let cell = part(&h);
+    assert!(cell.min.x > 0.05 && cell.max.x < 0.95, "the photo's cell: {cell:?}");
+    // the margins change while the next render is held back
+    open.set(false);
+    let old = h.app.renderer.textures.get(&slot).map(|t| t.key);
+    run(&mut h, "slideshow.layout", json!({"margins": 0.3}));
+    h.step();
+    assert_eq!(h.app.renderer.textures.get(&slot).map(|t| t.key), old, "the old render is still drawn");
+    assert_ne!(h.app.renderer.wanted(slot), old, "a new render is on the way");
+    assert_eq!(part(&h), egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), "the old texture moves whole");
+    // the new render lands: its own cell moves again
+    open.set(true);
+    assert!(h.step_until(SETTLE, |h| h.app.renderer.textures.get(&slot).map(|t| t.key) != old));
+    let cell = part(&h);
+    assert!(cell.min.x > 0.2 && cell.max.x < 0.8, "the new, smaller cell: {cell:?}");
+    run(&mut h, "slideshow.end", json!({}));
+    h.settle(SETTLE);
+}
+
+/// The amount set on the Low to High slider is saved with the library: the slider writes the
+/// live value as it moves, which leaves `slideshow.playback` nothing to change when it ends.
+#[test]
+fn the_pan_and_zoom_amount_from_the_slider_is_there_when_the_library_reopens() {
+    struct Folder(std::path::PathBuf);
+    impl Drop for Folder {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let dir = Folder(std::env::temp_dir().join(format!("lc-ui-pan-zoom-amount-{}", std::process::id())));
+    let _ = std::fs::remove_dir_all(&dir.0);
+    std::fs::create_dir_all(&dir.0).unwrap();
+    let mut session = lightcraft_engine::Session::new().with_fs();
+    session.open_library(&dir.0, false).unwrap();
+    let mut h = Headless::new(LightcraftApp::new(session, Services { png: None, ..Default::default() }), [1000.0, 700.0], 1.0);
+    h.step();
+    run(&mut h, "slideshow.playback", json!({"panAndZoom": true}));
+    let before = h.app.session.slideshow.pan_and_zoom_amount;
+    run(&mut h, "view.slideshowOptions", json!({}));
+    h.step();
+    let slider = reveal(&mut h, "slider:slideshowPanAndZoom");
+    let r = h.request("ui.dragWidget", json!({"id": "slider:slideshowPanAndZoom", "toX": slider.left(), "toY": slider.center().y}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    h.step();
+    let amount = h.app.session.slideshow.pan_and_zoom_amount;
+    assert!(amount < before - 0.1, "the slider moved the amount from {before} to {amount}");
+    h.settle(SETTLE);
+    drop(h);
+    let mut again = lightcraft_engine::Session::new().with_fs();
+    again.open_library(&dir.0, false).unwrap();
+    assert!(again.slideshow.pan_and_zoom, "the checkbox's setting is saved");
+    assert_eq!(again.slideshow.pan_and_zoom_amount, amount, "the slider's amount is saved");
+}
+
 #[test]
 fn random_order_starts_at_the_selection_and_is_fixed_by_the_seed() {
     let order = |seed: u64| {

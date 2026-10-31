@@ -278,10 +278,15 @@ fn slide_texture(app: &LightcraftApp, id: PhotoId) -> Option<&crate::render::Tex
 /// The part of `item`'s texture `t` that pan and zoom moves, in texture coordinates (0–1): the
 /// photo's visible part of a composed slide without overlays (its image cell), else all of it (a
 /// photo drawn on its own, a plain slide or a stand-in, and a slide with overlays, which are
-/// drawn into its texture and can cross the cell's edge: they move with the slide).
+/// drawn into its texture and can cross the cell's edge: they move with the slide). The cell
+/// comes from the current settings, so a texture rendered with older ones (its new render still
+/// on the way) also moves whole.
 pub(crate) fn moving_part(app: &LightcraftApp, item: Item, t: &crate::render::Tex) -> Rect {
     let Item::Photo(id) = item else { return full_uv() };
-    let composed = !app.session.slides_plain() && !app.session.slide_overlays.any() && slide_texture(app, id).is_some_and(|s| std::ptr::eq(s, t));
+    let composed = !app.session.slides_plain()
+        && !app.session.slide_overlays.any()
+        && slide_texture(app, id).is_some_and(|s| std::ptr::eq(s, t))
+        && app.renderer.is_current(Slot::Slide(item), t.key);
     let [w, h] = t.size;
     let Some(aspect) = app.session.slide_photo_aspect(id).filter(|_| composed && w > 0 && h > 0) else { return full_uv() };
     let v = lightcraft_slideshow::layout(&app.session.slide_layout, aspect, w, h).visible;

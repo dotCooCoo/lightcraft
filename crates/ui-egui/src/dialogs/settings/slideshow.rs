@@ -111,6 +111,11 @@ fn playback_section(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens) {
             }
             if r.drag_stopped() || (r.changed() && !r.dragged()) {
                 let _ = app.run("slideshow.playback", json!({"panAndZoomAmount": a}));
+                // the live value above already holds the amount, so the command finds no change
+                // to save: save it here
+                if let Err(e) = app.session.save_prefs() {
+                    log::warn!("slideshow: {e}");
+                }
             }
         });
     });
